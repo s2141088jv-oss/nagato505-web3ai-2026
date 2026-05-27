@@ -1,70 +1,41 @@
 from flask import Flask, render_template, request, jsonify
 import requests
-import xml.etree.ElementTree as ET
 from deep_translator import GoogleTranslator
-from datetime import datetime, timezone
+from datetime import datetime
 import re
 import os
 
 template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 app = Flask(__name__, template_folder=template_dir)
 
-ARXIV_NS = '{http://www.w3.org/2005/Atom}'
+OPENALEX_URL = "https://api.openalex.org/works"
+HEADERS = {"User-Agent": "PaperResearchAssistant/1.0 (mailto:s2141088jv@chibatech.ac.jp)"}
 
 
-def search_arxiv(query, max_results=4):
-    url = "https://export.arxiv.org/api/query"
+def search_papers(query, max_results=4):
     params = {
-        "search_query": " AND ".join(f"all:{w}" for w in query.split()),
-        "start": 0,
-        "max_results": max_results,
-        "sortBy": "relevance",
-        "sortOrder": "descending",
+        "search": query,
+        "per-page": max_results,
+        "select": "id,title,abstract_inverted_index,authorships,publication_year,doi,primary_location",
+        "mailto": "s2141088jv@chibatech.ac.jp",
     }
     try:
-        response = requests.get(url, params=params, timeout=20)
+        response = requests.get(OPENALEX_URL, params=params, headers=HEADERS, timeout=20)
         response.raise_for_status()
-        return parse_arxiv_response(response.text)
+        return response.json().get("results", [])
     except Exception as e:
-        app.logger.error(f"arXiv fetch error: {e}")
+        app.logger.error(f"OpenAlex fetch error: {e}")
         return []
 
 
-def parse_arxiv_response(xml_text):
-    papers = []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
-
-    for entry in root.findall(f'{ARXIV_NS}entry'):
-        title_elem = entry.find(f'{ARXIV_NS}title')
-        summary_elem = entry.find(f'{ARXIV_NS}summary')
-        published_elem = entry.find(f'{ARXIV_NS}published')
-        id_elem = entry.find(f'{ARXIV_NS}id')
-
-        if None in (title_elem, summary_elem, published_elem, id_elem):
-            continue
-
-        paper = {
-            'id': id_elem.text.strip(),
-            'title': title_elem.text.strip().replace('\n', ' '),
-            'abstract': summary_elem.text.strip().replace('\n', ' '),
-            'published': published_elem.text.strip(),
-            'authors': [
-                a.find(f'{ARXIV_NS}name').text
-                for a in entry.findall(f'{ARXIV_NS}author')
-                if a.find(f'{ARXIV_NS}name') is not None
-            ],
-            'url': id_elem.text.strip(),
-        }
-        for link in entry.findall(f'{ARXIV_NS}link'):
-            if link.get('rel') == 'alternate':
-                paper['url'] = link.get('href', paper['url'])
-
-        papers.append(paper)
-
-    return papers
+def reconstruct_abstract(inverted_index):
+    if not inverted_index:
+        return ""
+    pos_word = {}
+    for word, positions in inverted_index.items():
+        for pos in positions:
+            pos_word[pos] = word
+    return " ".join(pos_word[i] for i in sorted(pos_word))
 
 
 def translate_to_japanese(text):
@@ -85,23 +56,25 @@ def get_short_abstract(abstract, num_sentences=4):
     return short[:500] + ('...' if len(short) > 500 else '')
 
 
-def priority_stars(index, pub_date_str):
-    try:
-        pub_date = datetime.fromisoformat(pub_date_str.replace('Z', '+00:00'))
-        days_old = (datetime.now(timezone.utc) - pub_date).days
-        recency = 1 if days_old < 365 else (0.5 if days_old < 730 else 0)
-    except Exception:
-        recency = 0
-
-    relevance = max(0, 1 - index * 0.15)
+def priority_stars(index, year):
+    current_year = datetime.now().year
+    age = current_year - (year or current_year)
+    recency = 1 if age <= 1 else (0.5 if age <= 3 else 0)
+    relevance = max(0, 1 - index * 0.2)
     score = relevance + recency * 0.3
-
     if score > 1.1:
         return 3
-    elif score > 0.7:
+    elif score > 0.6:
         return 2
     else:
         return 1
+
+
+def paper_url(raw):
+    if raw.get("doi"):
+        return raw["doi"]
+    loc = raw.get("primary_location") or {}
+    return loc.get("landing_page_url") or raw.get("id") or "https://openalex.org"
 
 
 @app.route('/')
@@ -119,24 +92,33 @@ def search():
     if not query:
         return jsonify({'error': '検索キーワードを入力してください'}), 400
 
-    papers = search_arxiv(query)
+    papers = search_papers(query)
     if not papers:
-        return jsonify({'error': 'arXivから論文が見つかりませんでした。キーワードを変えてみてください。'}), 404
+        return jsonify({'error': '論文が見つかりませんでした。別のキーワードを試してください。'}), 404
 
     results = []
-    for i, paper in enumerate(papers):
-        title_ja = translate_to_japanese(paper['title'])
-        abstract_ja = translate_to_japanese(get_short_abstract(paper['abstract']))
+    for i, p in enumerate(papers):
+        title = (p.get('title') or '').replace('\n', ' ')
+        abstract_raw = reconstruct_abstract(p.get('abstract_inverted_index'))
+        year = p.get('publication_year')
+        authors = [
+            a['author']['display_name']
+            for a in (p.get('authorships') or [])[:3]
+            if a.get('author', {}).get('display_name')
+        ]
+
+        title_ja = translate_to_japanese(title)
+        abstract_ja = translate_to_japanese(get_short_abstract(abstract_raw)) if abstract_raw else '（要旨なし）'
 
         results.append({
             'rank': i + 1,
-            'title_en': paper['title'],
+            'title_en': title,
             'title_ja': title_ja,
             'abstract_ja': abstract_ja,
-            'authors': paper['authors'][:3],
-            'published': paper['published'][:4],
-            'url': paper['url'],
-            'stars': priority_stars(i, paper['published']),
+            'authors': authors,
+            'published': str(year) if year else '不明',
+            'url': paper_url(p),
+            'stars': priority_stars(i, year),
         })
 
     return jsonify({'results': results})
