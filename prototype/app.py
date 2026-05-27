@@ -13,9 +13,9 @@ ARXIV_NS = '{http://www.w3.org/2005/Atom}'
 
 
 def search_arxiv(query, max_results=4):
-    url = "http://export.arxiv.org/api/query"
+    url = "https://export.arxiv.org/api/query"
     params = {
-        "search_query": f"all:{query}",
+        "search_query": " AND ".join(f"all:{w}" for w in query.split()),
         "start": 0,
         "max_results": max_results,
         "sortBy": "relevance",
@@ -25,7 +25,8 @@ def search_arxiv(query, max_results=4):
         response = requests.get(url, params=params, timeout=20)
         response.raise_for_status()
         return parse_arxiv_response(response.text)
-    except Exception:
+    except Exception as e:
+        app.logger.error(f"arXiv fetch error: {e}")
         return []
 
 
