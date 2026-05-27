@@ -4,13 +4,15 @@ import xml.etree.ElementTree as ET
 from deep_translator import GoogleTranslator
 from datetime import datetime, timezone
 import re
+import os
 
-app = Flask(__name__)
+template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+app = Flask(__name__, template_folder=template_dir)
 
 ARXIV_NS = '{http://www.w3.org/2005/Atom}'
 
 
-def search_arxiv(query, max_results=6):
+def search_arxiv(query, max_results=4):
     url = "http://export.arxiv.org/api/query"
     params = {
         "search_query": f"all:{query}",

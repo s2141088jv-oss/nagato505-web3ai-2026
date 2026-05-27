@@ -1,0 +1,19 @@
+{
+  "builds": [
+    {
+      "src": "prototype/app.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "prototype/app.py"
+    }
+  ],
+  "functions": {
+    "prototype/app.py": {
+      "maxDuration": 60
+    }
+  }
+}
